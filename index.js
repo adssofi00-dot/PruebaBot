@@ -1,36 +1,32 @@
 const express = require("express");
 const axios = require("axios");
-const { v2beta1 } = require("@google-cloud/dialogflow");
-const uuid = require("uuid");
+const { SessionsClient } = require("@google-cloud/dialogflow");
 
 const app = express();
 app.use(express.json());
 
-// 🔹 Variables de entorno — NO pongas los tokens en el código
+// Variables de entorno (Render)
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
-const GOOGLE_PROJECT_ID = process.env.GOOGLE_PROJECT_ID;
-const GOOGLE_CLIENT_EMAIL = process.env.GOOGLE_CLIENT_EMAIL;
-const GOOGLE_PRIVATE_KEY = process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n");
+const DIALOGFLOW_PROJECT_ID = process.env.DIALOGFLOW_PROJECT_ID;
 
-// ====================== FACEBOOK WEBHOOK VERIFY ======================
+// GOOGLE CREDENTIALS ya está en Render como JSON
+const sessionClient = new SessionsClient();
+
+// ✅ Validación Webhook Facebook
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
 
   if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    console.log("✔ VERIFICADO DESDE FACEBOOK");
     return res.status(200).send(challenge);
   }
-
-  return res.status(403).send("Error de verificación");
+  res.status(403).send("Unauthorized");
 });
 
-// ====================== MENSAJES ENTRANTES DE FACEBOOK ======================
+// ✅ Recepción mensajes Facebook Messenger
 app.post("/webhook", async (req, res) => {
-  console.log("📥 Payload recibido:", JSON.stringify(req.body, null, 2));
-
   const body = req.body;
 
   if (body.object === "page") {
@@ -41,31 +37,27 @@ app.post("/webhook", async (req, res) => {
       if (event.message && event.message.text) {
         const userMessage = event.message.text;
 
-        const botReply = await sendToDialogflow(senderId, userMessage);
+        console.log("📩 Usuario dijo:", userMessage);
 
-        await sendMessageToFacebook(senderId, botReply);
+        // 🔥 Enviar el mensaje a Dialogflow
+        const responseText = await sendToDialogflow(userMessage, senderId);
+
+        // 🔥 Responder al usuario en Messenger
+        sendMessage(senderId, responseText);
       }
     });
 
-    res.sendStatus(200);
-  } else {
-    res.sendStatus(404);
+    return res.status(200).send("EVENT_RECEIVED");
   }
+
+  res.sendStatus(404);
 });
 
-// ====================== ENVIAR TEXTO A DIALOGFLOW ======================
-async function sendToDialogflow(senderId, text) {
-  const sessionClient = new v2beta1.SessionsClient({
-    credentials: {
-      private_key: GOOGLE_PRIVATE_KEY,
-      client_email: GOOGLE_CLIENT_EMAIL,
-    },
-  });
-
-  const sessionPath = sessionClient.projectLocationAgentSessionPath(
-    GOOGLE_PROJECT_ID,
-    "global",
-    uuid.v4()
+// ✅ Función: Enviar texto a Dialogflow
+async function sendToDialogflow(text, sessionId) {
+  const sessionPath = sessionClient.projectAgentSessionPath(
+    DIALOGFLOW_PROJECT_ID,
+    sessionId
   );
 
   const request = {
@@ -73,27 +65,29 @@ async function sendToDialogflow(senderId, text) {
     queryInput: {
       text: {
         text,
-        languageCode: "es",
-      },
-    },
+        languageCode: "es"
+      }
+    }
   };
 
   const responses = await sessionClient.detectIntent(request);
-  return responses[0].queryResult.fulfillmentText || "No entendí 🙈";
+  return responses[0].queryResult.fulfillmentText;
 }
 
-// ====================== RESPUESTA A FACEBOOK MESSENGER ======================
-async function sendMessageToFacebook(senderId, message) {
-  await axios.post(
-    `https://graph.facebook.com/v17.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`,
-    {
+// ✅ Enviar respuesta a Messenger
+function sendMessage(senderId, message) {
+  axios({
+    url: "https://graph.facebook.com/v19.0/me/messages",
+    method: "POST",
+    params: { access_token: PAGE_ACCESS_TOKEN },
+    data: {
       recipient: { id: senderId },
-      message: { text: message },
+      message: { text: message }
     }
-  );
+  });
 }
 
-app.listen(3000, () => {
-  console.log("🔥 Servidor corriendo en Render puerto 3000");
-});
+app.listen(3000, () => console.log("🔥 Webhook activo en puerto 3000"));
+
+
 
